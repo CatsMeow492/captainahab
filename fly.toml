@@ -1,0 +1,35 @@
+# fly.toml app configuration file generated for hyperliquid-alerts on 2025-10-18T16:47:19-07:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'hyperliquid-alerts'
+primary_region = 'lax'
+
+[build]
+  dockerfile = 'Dockerfile'
+
+[env]
+  DB_PATH = '/data/seen.db'
+  HYPERLIQUID_API = 'https://api.hyperliquid.xyz/info'
+  HYPURR_BASE = 'https://hypurrscan.io'
+  LOOKBACK_MINUTES = '10'
+  POLL_SECONDS = '30'
+  USD_DEPOSIT_THRESHOLD = '20000000'
+  USD_SHORT_THRESHOLD = '25000000'
+  WEBHOOK_TARGET = 'slack'
+
+[[mounts]]
+  source = 'alertvol'
+  destination = '/data'
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = 'stop'
+  auto_start_machines = true
+
+[[vm]]
+  memory = '1gb'
+  cpu_kind = 'shared'
+  cpus = 1
