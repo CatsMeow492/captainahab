@@ -236,6 +236,11 @@ async def fetch_perps(address: str, since_ms: int) -> List[Dict[str, Any]]:
         stats["last_hyperliquid_check"] = now_utc()
         stats["hyperliquid_status"] = "healthy"
         
+        # DEBUG: Log raw API response
+        print(f"[DEBUG] fetch_perps for {address[:10]}...{address[-6:]}")
+        print(f"[DEBUG]   Since: {ms_to_iso(since_ms)}")
+        print(f"[DEBUG]   API returned: {len(data) if isinstance(data, list) else 'not a list'} fills")
+        
         # Filter by timestamp - userFills returns chronological fills
         # Structure: list of fills with {coin, px, sz, side, time, ...}
         filtered = []
@@ -253,7 +258,7 @@ async def fetch_perps(address: str, since_ms: int) -> List[Dict[str, Any]]:
                     # Determine if it's a short open (sell side)
                     is_short = side in ["sell", "short"]
                     
-                    filtered.append({
+                    trade = {
                         "type": "short_open" if is_short else "long_open",
                         "token": coin,
                         "amount": size,
@@ -264,8 +269,13 @@ async def fetch_perps(address: str, since_ms: int) -> List[Dict[str, Any]]:
                         "time": fill_time_ms,
                         "side": side,
                         "oid": fill.get("oid", "")
-                    })
+                    }
+                    filtered.append(trade)
+                    # DEBUG: Log each filtered trade
+                    print(f"[DEBUG]   ✓ {side.upper()} {coin} {size:.4f} @ ${px:.2f} = ${notional:,.0f} "
+                          f"at {ms_to_iso(fill_time_ms)}")
         
+        print(f"[DEBUG]   Filtered: {len(filtered)} trades after {ms_to_iso(since_ms)}")
         return filtered
     except Exception as e:
         stats["api_calls_failed"] += 1
@@ -295,6 +305,11 @@ async def fetch_transfers(address: str, since_ms: int) -> List[Dict[str, Any]]:
         stats["last_hyperliquid_check"] = now_utc()
         stats["hyperliquid_status"] = "healthy"
         
+        # DEBUG: Log raw API response
+        print(f"[DEBUG] fetch_transfers for {address[:10]}...{address[-6:]}")
+        print(f"[DEBUG]   Since: {ms_to_iso(since_ms)}")
+        print(f"[DEBUG]   API returned: {len(data) if isinstance(data, list) else 'not a list'} updates")
+        
         # Filter by timestamp and type
         # Structure: list of ledger updates with {time, hash, delta: {type, usdc, ...}}
         filtered = []
@@ -312,14 +327,19 @@ async def fetch_transfers(address: str, since_ms: int) -> List[Dict[str, Any]]:
                         if delta_type in ["deposit", "withdraw", "internalTransfer"]:
                             usdc_amount = abs(float(delta.get("usdc", 0)))
                             
-                            filtered.append({
+                            transfer = {
                                 "type": delta_type.capitalize(),
                                 "token": "USDC",
                                 "usdamount": usdc_amount,
                                 "hash": update.get("hash", ""),
                                 "time": update_time_ms
-                            })
+                            }
+                            filtered.append(transfer)
+                            # DEBUG: Log each filtered transfer
+                            print(f"[DEBUG]   ✓ {delta_type.upper()} ${usdc_amount:,.0f} USDC "
+                                  f"at {ms_to_iso(update_time_ms)}")
         
+        print(f"[DEBUG]   Filtered: {len(filtered)} transfers after {ms_to_iso(since_ms)}")
         return filtered
     except Exception as e:
         stats["api_calls_failed"] += 1
@@ -793,6 +813,11 @@ def to_discord_msg(address: str, items: List[Dict[str,Any]], is_vip: bool = Fals
 def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Dict[str,Any]]) -> List[Dict[str,Any]]:
     out = []
     vip = is_vip(address)
+    
+    # DEBUG: Log classification input
+    print(f"[DEBUG] classify_events for {address[:10]}...{address[-6:]}")
+    print(f"[DEBUG]   VIP: {vip}")
+    print(f"[DEBUG]   Processing: {len(perps)} perps, {len(transfers)} transfers")
 
     # Deposits - for VIP addresses, alert on ANY deposit; for others, only large ones
     for r in transfers:
@@ -860,8 +885,14 @@ def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Di
                     "px": px,
                     "notional": notional,
                     "time_ms": ts_ms,
-                    "hash": r.get("hash")
-                })
+                        "hash": r.get("hash")
+                    })
+    
+    # DEBUG: Log classification output
+    print(f"[DEBUG]   Generated: {len(out)} alerts")
+    for i, alert in enumerate(out, 1):
+        print(f"[DEBUG]     Alert {i}: {alert['kind']} - {alert.get('activity_type', alert.get('token', ''))} "
+              f"${alert.get('notional', 0):,.0f}")
     
     return out
 
