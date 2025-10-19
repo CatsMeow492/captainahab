@@ -256,7 +256,8 @@ async def fetch_perps(address: str, since_ms: int) -> List[Dict[str, Any]]:
                     notional = size * px
                     
                     # Determine if it's a short open (sell side)
-                    is_short = side in ["sell", "short"]
+                    # Hyperliquid uses: "A" = Ask (sell/short), "B" = Bid (buy/long)
+                    is_short = side in ["sell", "short", "a", "ask"]
                     
                     trade = {
                         "type": "short_open" if is_short else "long_open",
