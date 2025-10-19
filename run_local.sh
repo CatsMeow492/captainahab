@@ -3,9 +3,10 @@
 # Hyperliquid Alert Service - Local Runner
 # Run this while waiting for Fly.io deployment to be fixed
 
-export WEBHOOK_URL="https://hooks.slack.com/services/YOUR/WEBHOOK/URL"
-export WATCH_ADDRESSES="0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae"
-export VIP_ADDRESSES="0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae"
+# Set your Slack or Discord webhook URL
+export WEBHOOK_URL="${WEBHOOK_URL:-https://hooks.slack.com/services/YOUR/WEBHOOK/HERE}"
+export WATCH_ADDRESSES="0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae,0x4f9A37Bc2A4a2861682c0e9BE1F9417Df03CC27C"
+export VIP_ADDRESSES="0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae,0x4f9A37Bc2A4a2861682c0e9BE1F9417Df03CC27C"
 export WEBHOOK_TARGET="slack"
 export DB_PATH="./local_seen.db"
 export POLL_SECONDS="30"

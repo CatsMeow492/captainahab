@@ -68,10 +68,12 @@ def now_utc() -> datetime:
 def ms_to_iso(ms: int) -> str:
     return datetime.fromtimestamp(ms/1000, tz=timezone.utc).isoformat()
 
-def sha_key(*parts: str) -> str:
+def sha_key(*parts) -> str:
     h = hashlib.sha256()
     for p in parts:
-        h.update((p or "").encode())
+        # Convert everything to string, handle None
+        s = str(p) if p is not None else ""
+        h.update(s.encode())
         h.update(b"|")
     return h.hexdigest()
 
@@ -803,13 +805,26 @@ def get_recent_market_trades(window_minutes: int = None) -> List[Dict[str, Any]]
 
 def store_market_trade(trade: Dict[str, Any]):
     """Store a large trade in market_trades table"""
+    # Generate trade ID from hash or create one
+    trade_hash = trade.get('hash', '')
+    if not trade_hash:
+        trade_id = trade.get('trade_id', '')
+        if not trade_id:
+            # Create ID from wallet, token, timestamp
+            wallet = str(trade.get('wallet', trade.get('address', '')))
+            token = str(trade.get('token', ''))
+            timestamp = str(trade.get('timestamp_ms', trade.get('time', 0)))
+            trade_id = sha_key(wallet, token, timestamp)
+    else:
+        trade_id = trade_hash
+    
     with sqlite3.connect(DB_PATH) as con:
         con.execute("""
             INSERT OR REPLACE INTO market_trades(
                 trade_id, wallet, token, side, notional, timestamp_ms, wallet_age_days
             ) VALUES(?, ?, ?, ?, ?, ?, ?)
         """, (
-            trade.get('hash', trade.get('trade_id', sha_key(str(trade)))),
+            trade_id,
             trade.get('wallet', trade.get('address', '')),
             trade.get('token', ''),
             trade.get('side', ''),
@@ -913,6 +928,23 @@ async def scan_once():
             vip = is_vip(addr)
             print(f"[ALERT] {len(deduped)} new event(s) for {addr} (VIP: {vip})")
             
+            # Limit alerts to prevent overwhelming Slack (max 10 per message)
+            if len(deduped) > 10:
+                print(f"[INFO] Too many events ({len(deduped)}), sending summary only")
+                # Send summary instead of individual alerts
+                summary_alert = [{
+                    "kind": "VIP_ACTIVITY" if vip else "ACTIVITY_SUMMARY",
+                    "activity_type": "MULTIPLE",
+                    "subtype": f"{len(deduped)} events detected",
+                    "token": "Various",
+                    "amount": "",
+                    "px": "",
+                    "notional": sum(d.get('notional', 0) for d in deduped),
+                    "time_ms": max(d.get('time_ms', 0) for d in deduped),
+                    "hash": f"{len(deduped)} trades"
+                }]
+                deduped = summary_alert
+            
             if WEBHOOK_TARGET == "slack":
                 blocks = to_slack_blocks(addr, deduped, vip)
                 await post_slack(blocks)
@@ -948,21 +980,32 @@ def load_vip_wallets_from_db():
             print(f"[VIP] Loaded {loaded} wallets from database")
 
 async def poll_loop():
-    ensure_db()
+    print("[POLL_LOOP] Starting poll_loop function...")
     
-    # Load VIP wallets from database (persisted across restarts)
-    load_vip_wallets_from_db()
-    
-    # Initialize stats
-    stats["start_time"] = now_utc()
-    
-    print(f"[START] Monitoring {len(WATCH_ADDRESSES)} addresses (VIP: {len(VIP_ADDRESSES)})")
-    print(f"[CONFIG] Poll interval: {POLL_SECONDS}s, Lookback: {LOOKBACK_MINUTES}min")
-    print(f"[CONFIG] Short threshold: ${USD_SHORT_THRESHOLD:,.0f}, Deposit threshold: ${USD_DEPOSIT_THRESHOLD:,.0f}")
-    print(f"[CONFIG] Cluster detection: {'ENABLED' if CLUSTER_DETECTION_ENABLED else 'DISABLED'}")
-    
-    # Send startup notification
-    await send_status_message("startup")
+    try:
+        ensure_db()
+        print("[POLL_LOOP] Database ensured")
+        
+        # Load VIP wallets from database (persisted across restarts)
+        load_vip_wallets_from_db()
+        print("[POLL_LOOP] VIP wallets loaded")
+        
+        # Initialize stats
+        stats["start_time"] = now_utc()
+        
+        print(f"[START] Monitoring {len(WATCH_ADDRESSES)} addresses (VIP: {len(VIP_ADDRESSES)})")
+        print(f"[CONFIG] Poll interval: {POLL_SECONDS}s, Lookback: {LOOKBACK_MINUTES}min")
+        print(f"[CONFIG] Short threshold: ${USD_SHORT_THRESHOLD:,.0f}, Deposit threshold: ${USD_DEPOSIT_THRESHOLD:,.0f}")
+        print(f"[CONFIG] Cluster detection: {'ENABLED' if CLUSTER_DETECTION_ENABLED else 'DISABLED'}")
+        
+        # Send startup notification
+        await send_status_message("startup")
+        print("[POLL_LOOP] Startup message sent")
+    except Exception as e:
+        print(f"[POLL_LOOP ERROR] Initialization failed: {e}")
+        import traceback
+        traceback.print_exc()
+        return
     
     # Track time for periodic status reports (every 2 hours)
     next_status_report = now_utc() + timedelta(hours=2)
@@ -981,10 +1024,19 @@ async def poll_loop():
                 next_status_report = now_utc() + timedelta(hours=2)
                 
         except Exception as e:
-            print("[ERROR] scan_once failed:", e)
+            import traceback
+            print(f"[ERROR] scan_once failed: {e}")
+            print(f"[ERROR] Traceback: {traceback.format_exc()}")
         await asyncio.sleep(POLL_SECONDS)
 
 @app.on_event("startup")
 async def startup_event():
-    asyncio.create_task(poll_loop())
+    try:
+        print("[STARTUP] Creating background polling task...")
+        asyncio.create_task(poll_loop())
+        print("[STARTUP] Background task created successfully")
+    except Exception as e:
+        print(f"[STARTUP ERROR] Failed to create background task: {e}")
+        import traceback
+        traceback.print_exc()
 
