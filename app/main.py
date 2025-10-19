@@ -59,6 +59,52 @@ stats = {
     "market_scans_completed": 0
 }
 
+# VIP wallet activity tracking (last hour)
+vip_activity = {}
+
+def track_vip_activity(address: str, event_type: str, notional: float = 0):
+    """Track VIP wallet activity for hourly summaries"""
+    if address.lower() not in vip_activity:
+        vip_activity[address.lower()] = {
+            "trades": 0,
+            "deposits": 0,
+            "withdrawals": 0,
+            "total_notional": 0,
+            "last_activity": None
+        }
+    
+    activity = vip_activity[address.lower()]
+    
+    if event_type in ["TRADE", "trade"]:
+        activity["trades"] += 1
+    elif event_type in ["DEPOSIT", "Deposit"]:
+        activity["deposits"] += 1
+    elif event_type in ["WITHDRAW", "Withdraw"]:
+        activity["withdrawals"] += 1
+    
+    activity["total_notional"] += notional
+    activity["last_activity"] = now_utc()
+
+def reset_vip_activity():
+    """Reset VIP activity tracking (called every hour)"""
+    vip_activity.clear()
+
+def get_vip_summary() -> Dict[str, Any]:
+    """Get summary of VIP wallet activity"""
+    total_trades = sum(v["trades"] for v in vip_activity.values())
+    total_deposits = sum(v["deposits"] for v in vip_activity.values())
+    total_withdrawals = sum(v["withdrawals"] for v in vip_activity.values())
+    total_notional = sum(v["total_notional"] for v in vip_activity.values())
+    
+    return {
+        "wallets_active": len(vip_activity),
+        "total_trades": total_trades,
+        "total_deposits": total_deposits,
+        "total_withdrawals": total_withdrawals,
+        "total_notional": total_notional,
+        "wallet_details": vip_activity.copy()
+    }
+
 # -------------------------
 # Utilities
 # -------------------------
@@ -555,6 +601,52 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                     )}}
                 ]
             
+            elif message_type == "vip_summary":
+                summary = details.get('summary', {})
+                wallet_count = len(VIP_ADDRESSES)
+                
+                if summary.get('wallets_active', 0) == 0:
+                    # No activity - calm seas
+                    blocks = [
+                        {"type": "header", "text": {"type": "plain_text", "text": "🐋 VIP Whale Watch Summary"}},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*\"The sea was calm, the whales nowhere to be seen...\"*\n\n"
+                            f"🔭 Watching: *{wallet_count} VIP whales*\n"
+                            f"📊 Activity (last hour): **None detected**\n\n"
+                            f"_All quiet on the Hyperliquid front. The whales slumber beneath the waves..._"
+                        )}},
+                        {"type": "divider"}
+                    ]
+                else:
+                    # Activity detected
+                    wallet_lines = []
+                    for addr, data in summary.get('wallet_details', {}).items():
+                        total_events = data['trades'] + data['deposits'] + data['withdrawals']
+                        if total_events > 0:
+                            wallet_lines.append(
+                                f"• `{addr[:10]}...{addr[-6:]}`: {data['trades']} trades, "
+                                f"{data['deposits']} deposits, {data['withdrawals']} withdrawals "
+                                f"(${data['total_notional']:,.0f})"
+                            )
+                    
+                    wallet_summary = "\n".join(wallet_lines) if wallet_lines else "• No activity"
+                    
+                    blocks = [
+                        {"type": "header", "text": {"type": "plain_text", "text": "🐋 VIP Whale Watch Summary"}},
+                        {"type": "section", "text": {"type": "mrkdwn", "text": (
+                            f"*\"Movement in the deep! The white whales stir!\"* 🐋\n\n"
+                            f"🔭 Watching: *{wallet_count} VIP whales*\n"
+                            f"📊 Active wallets: *{summary['wallets_active']}*\n"
+                            f"📈 Total trades: *{summary['total_trades']}*\n"
+                            f"💰 Total deposits: *{summary['total_deposits']}*\n"
+                            f"💸 Total withdrawals: *{summary['total_withdrawals']}*\n"
+                            f"💵 Total notional: *${summary['total_notional']:,.0f}*\n\n"
+                            f"🎯 Wallet Activity:\n{wallet_summary}\n\n"
+                            f"_\"The hunt continues through calm and storm alike...\"_ ⚓"
+                        )}},
+                        {"type": "divider"}
+                    ]
+            
             elif message_type == "suspicious_cluster":
                 cluster = details.get('cluster', {})
                 wallets = cluster.get('wallets', [])
@@ -708,6 +800,7 @@ def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Di
         
         if vip and typ in ("Deposit", "Withdraw"):
             # VIP: alert on any deposit/withdrawal
+            track_vip_activity(address, typ, usd)
             out.append({
                 "kind": "VIP_ACTIVITY",
                 "activity_type": typ.upper(),
@@ -741,6 +834,7 @@ def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Di
         
         if vip:
             # VIP: alert on ANY trade activity
+            track_vip_activity(address, "TRADE", notional)
             out.append({
                 "kind": "VIP_ACTIVITY",
                 "activity_type": "TRADE",
@@ -1007,8 +1101,14 @@ async def poll_loop():
         traceback.print_exc()
         return
     
-    # Track time for periodic status reports (every 2 hours)
+    # Track time for periodic reports
     next_status_report = now_utc() + timedelta(hours=2)
+    next_vip_summary = now_utc() + timedelta(hours=1)
+    
+    # Send initial VIP summary at startup
+    summary = get_vip_summary()
+    await send_status_message("vip_summary", {"summary": summary})
+    print("[VIP] Initial summary sent")
     
     while True:
         try:
@@ -1018,10 +1118,18 @@ async def poll_loop():
             if CLUSTER_DETECTION_ENABLED:
                 await scan_for_clusters()
             
-            # Send periodic status report
+            # Send periodic status report (every 2 hours)
             if now_utc() >= next_status_report:
                 await send_status_message("status_report")
                 next_status_report = now_utc() + timedelta(hours=2)
+            
+            # Send VIP summary (every hour)
+            if now_utc() >= next_vip_summary:
+                summary = get_vip_summary()
+                await send_status_message("vip_summary", {"summary": summary})
+                print(f"[VIP] Hourly summary sent ({summary['wallets_active']} active, {summary['total_trades']} trades)")
+                reset_vip_activity()  # Reset for next hour
+                next_vip_summary = now_utc() + timedelta(hours=1)
                 
         except Exception as e:
             import traceback
