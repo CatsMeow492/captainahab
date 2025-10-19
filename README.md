@@ -25,10 +25,14 @@
 ## ⚓ Features
 
 - **🐋 White Whale Monitoring**: Track suspected insider addresses (the elusive white whales) with alerts on ANY activity
+- **🎣 Pod Detection**: Automatically hunt coordinated whale pods (insider trading clusters) in real-time
+- **⚓ Self-Expanding Fleet**: When whale pods detected, all members added to perpetual watch
 - **🎯 Large Position Tracking**: Harpoon alerts on shorts ≥ $25M and deposits ≥ $20M
 - **🌊 Multi-Source Data**: Sails the official Hyperliquid API (with HypurrScan support ready)
-- **⚓ Smart Deduplication**: SQLite-based ship's log to prevent duplicate alerts
-- **📯 Webhook Alerts**: Sound the alarm to Slack or Discord instantly
+- **📜 Ship's Log**: SQLite-based deduplication and historical cluster tracking
+- **📯 Webhook Alerts**: Sound the alarm to Slack or Discord with Captain Ahab's voice
+- **🔭 Status Reports**: Captain's log updates every 2 hours on the state of the hunt
+- **🗺️ Historical Research**: Tools to investigate past whale sightings and insider incidents
 
 ## 🚢 Setting Sail (Quick Start)
 
@@ -119,6 +123,13 @@ curl https://hyperliquid-alerts.fly.dev/health
 | `LOOKBACK_MINUTES` | Initial lookback window | `10` |
 | `HYPERLIQUID_API` | Hyperliquid API endpoint | `https://api.hyperliquid.xyz/info` |
 | `DB_PATH` | SQLite database path | `/data/seen.db` |
+| **Cluster Detection** | | |
+| `CLUSTER_DETECTION_ENABLED` | Enable pod hunting (cluster detection) | `true` |
+| `CLUSTER_TIME_WINDOW_MINUTES` | Time window for detecting coordinated activity | `60` |
+| `CLUSTER_MIN_SCORE` | Minimum suspicion score to alert (0-100) | `70` |
+| `CLUSTER_MIN_NOTIONAL` | Minimum total USD for cluster alert | `50000000` |
+| `MARKET_SCAN_TOKENS` | Tokens to monitor for clusters (comma-separated) | `BTC,ETH` |
+| `MARKET_MIN_TRADE_SIZE` | Minimum trade size to track for clusters | `5000000` |
 
 ### 🐋 White Whale Monitoring (VIP Addresses)
 
@@ -139,6 +150,55 @@ To mark additional whales for the hunt:
 ```bash
 flyctl secrets set VIP_ADDRESSES="0xb317d2bc2d3d2df5fa441b5bae0ab9d8b07283ae,0x9eec9...,0x9263..."
 ```
+
+### 🎣 Pod Detection (Cluster Monitoring)
+
+**"A pod! A pod of leviathans, hunting in coordinated fashion!"**
+
+Captain Ahab now automatically detects **suspicious whale pods** — coordinated trading patterns that suggest insider knowledge:
+
+**What Triggers a Cluster Alert:**
+- 3+ large trades (>$5M each) within 60 minutes
+- 2+ different wallets coordinating
+- Total notional ≥ $50M
+- 80%+ directional alignment (all SHORT or all LONG)
+- Suspicion score ≥ 70/100
+
+**When Detected:**
+1. 🚨 Instant Slack alert with full details
+2. 💾 Cluster logged to database
+3. ⚓ **ALL cluster wallets auto-added to VIP list**
+4. 🔭 Future monitoring: Every move = instant alert
+
+**Example Cluster Alert:**
+```
+⚠️ SUSPICIOUS CLUSTER DETECTED ⚠️
+"Thar she blows! A pod of whales hunting in formation!" 🐋
+
+🔴 Suspicion Score: 87/100
+📊 Wallets: 4 | Token: BTC | Notional: $147.5M
+⏰ Time window: 23.4 minutes | Direction: 100% SHORT
+
+🎯 Wallets: 0xabcd... ($45M), 0xef12... ($38M), ...
+🚨 ACTION: Adding all wallets to VIP watch list
+```
+
+**The beauty:** Your surveillance net **grows automatically** as suspicious activity detected!
+
+### 🗺️ Historical Research
+
+**Investigate past insider incidents:**
+
+```bash
+# Run the Oct 14, 2025 tariff incident research
+cd /Users/taylormohney/Documents/GitHub/captainahab
+source venv/bin/activate
+python research/find_insider_cluster.py
+```
+
+This queries Hyperliquid for suspicious trading patterns before major news events.
+
+See `research/INSIDER_WALLETS.md` for details on the Trump tariff investigation.
 
 ## Data Sources
 

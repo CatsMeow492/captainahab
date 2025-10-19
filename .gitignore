@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+*.egg-info/
+dist/
+build/
+
+# Local database
+*.db
+local_seen.db
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+monitor.log
+monitor.pid
+
+# Research outputs (generated files)
+research/*.csv
+research/*.json
+research/insider_cluster_oct14.csv
+research/cluster_analysis.json
+
+# Fly.io
+.fly/
+
