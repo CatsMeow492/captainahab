@@ -21,6 +21,9 @@ VIP_ADDRESSES = [a.strip().lower() for a in os.getenv("VIP_ADDRESSES","").split(
 USD_SHORT_THRESHOLD = float(os.getenv("USD_SHORT_THRESHOLD", "25000000"))
 USD_DEPOSIT_THRESHOLD = float(os.getenv("USD_DEPOSIT_THRESHOLD", "20000000"))
 
+# VIP lookback config
+VIP_LOOKBACK_HOURS = int(os.getenv("VIP_LOOKBACK_HOURS", "48"))  # Look back 48 hours for VIP wallets
+
 # Cluster detection config
 CLUSTER_DETECTION_ENABLED = os.getenv("CLUSTER_DETECTION_ENABLED", "true").lower() == "true"
 CLUSTER_TIME_WINDOW_MINUTES = int(os.getenv("CLUSTER_TIME_WINDOW_MINUTES", "60"))
@@ -983,10 +986,15 @@ async def scan_once():
         print("[INFO] No WATCH_ADDRESSES or WEBHOOK_URL configured, skipping scan")
         return
 
-    since_ms_default = int((now_utc() - timedelta(minutes=LOOKBACK_MINUTES)).timestamp() * 1000)
-
     for addr in WATCH_ADDRESSES:
         source_key = f"hyperliquid:addr:{addr}"
+        
+        # VIP wallets get longer lookback window to catch recent suspicious activity
+        if is_vip(addr):
+            since_ms_default = int((now_utc() - timedelta(hours=VIP_LOOKBACK_HOURS)).timestamp() * 1000)
+        else:
+            since_ms_default = int((now_utc() - timedelta(minutes=LOOKBACK_MINUTES)).timestamp() * 1000)
+        
         since_ms = get_cursor(source_key, since_ms_default)
 
         try:
@@ -1055,6 +1063,20 @@ async def scan_once():
 @app.get("/health", response_class=PlainTextResponse)
 async def health():
     return "ok"
+
+@app.post("/reset-vip-cursors", response_class=PlainTextResponse)
+async def reset_vip_cursors():
+    """Reset cursors for all VIP wallets to force re-scan of recent history"""
+    count = 0
+    with sqlite3.connect(DB_PATH) as con:
+        for addr in VIP_ADDRESSES:
+            source_key = f"hyperliquid:addr:{addr}"
+            con.execute("DELETE FROM cursors WHERE source=?", (source_key,))
+            count += 1
+        con.commit()
+    
+    print(f"[ADMIN] Reset cursors for {count} VIP wallets - will re-scan last {VIP_LOOKBACK_HOURS} hours")
+    return f"Reset {count} VIP wallet cursors. Next scan will look back {VIP_LOOKBACK_HOURS} hours."
 
 def load_vip_wallets_from_db():
     """Load dynamically added VIP wallets from database on startup"""
