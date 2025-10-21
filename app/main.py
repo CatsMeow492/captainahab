@@ -65,7 +65,7 @@ stats = {
 # VIP wallet activity tracking (last hour)
 vip_activity = {}
 
-def track_vip_activity(address: str, event_type: str, notional: float = 0):
+def track_vip_activity(address: str, event_type: str, notional: float = 0, side: str = "", size: float = 0, token: str = ""):
     """Track VIP wallet activity for hourly summaries"""
     if address.lower() not in vip_activity:
         vip_activity[address.lower()] = {
@@ -73,13 +73,23 @@ def track_vip_activity(address: str, event_type: str, notional: float = 0):
             "deposits": 0,
             "withdrawals": 0,
             "total_notional": 0,
-            "last_activity": None
+            "last_activity": None,
+            "positions": {}  # Track net position by token
         }
     
     activity = vip_activity[address.lower()]
     
     if event_type in ["TRADE", "trade"]:
         activity["trades"] += 1
+        # Track position changes
+        if token and size:
+            if token not in activity["positions"]:
+                activity["positions"][token] = 0
+            # Buy adds to position, sell subtracts
+            if side.lower() in ["b", "buy", "bid"]:
+                activity["positions"][token] += size
+            elif side.lower() in ["a", "sell", "ask", "short"]:
+                activity["positions"][token] -= size
     elif event_type in ["DEPOSIT", "Deposit"]:
         activity["deposits"] += 1
     elif event_type in ["WITHDRAW", "Withdraw"]:
@@ -91,6 +101,43 @@ def track_vip_activity(address: str, event_type: str, notional: float = 0):
 def reset_vip_activity():
     """Reset VIP activity tracking (called every hour)"""
     vip_activity.clear()
+
+async def get_wallet_net_position(address: str) -> Dict[str, float]:
+    """
+    Calculate net position for a wallet by fetching ALL trade history.
+    Returns dict of {token: net_position} where positive = long, negative = short.
+    """
+    try:
+        payload = {
+            "type": "userFills",
+            "user": address
+        }
+        
+        data = await http_post_json(HYPERLIQUID_API, payload)
+        
+        positions = {}
+        if isinstance(data, list):
+            for fill in data:
+                coin = fill.get("coin", "")
+                side = fill.get("side", "").lower()
+                size = abs(float(fill.get("sz", 0)))
+                
+                if coin and size:
+                    if coin not in positions:
+                        positions[coin] = 0
+                    
+                    # Buy (bid) adds to position, Sell (ask) subtracts
+                    if side in ["b", "buy", "bid"]:
+                        positions[coin] += size
+                    elif side in ["a", "sell", "ask", "short"]:
+                        positions[coin] -= size
+        
+        # Filter out positions that are essentially zero
+        return {k: v for k, v in positions.items() if abs(v) > 0.0001}
+    
+    except Exception as e:
+        print(f"[ERROR] Failed to get net position for {address}: {e}")
+        return {}
 
 def get_vip_summary() -> Dict[str, Any]:
     """Get summary of VIP wallet activity"""
@@ -629,6 +676,30 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                 summary = details.get('summary', {})
                 wallet_count = len(VIP_ADDRESSES)
                 
+                # Fetch net positions for all VIP wallets
+                vip_positions = {}
+                for addr in VIP_ADDRESSES:
+                    positions = await get_wallet_net_position(addr)
+                    if positions:
+                        vip_positions[addr.lower()] = positions
+                
+                # Format position summary
+                position_lines = []
+                for addr in VIP_ADDRESSES:
+                    addr_lower = addr.lower()
+                    positions = vip_positions.get(addr_lower, {})
+                    
+                    if positions:
+                        for token, size in positions.items():
+                            if size > 0:
+                                position_lines.append(f"  • `{addr[:10]}...{addr[-6:]}`: 📈 LONG {token} ({size:.4f})")
+                            elif size < 0:
+                                position_lines.append(f"  • `{addr[:10]}...{addr[-6:]}`: 📉 SHORT {token} ({abs(size):.4f})")
+                    else:
+                        position_lines.append(f"  • `{addr[:10]}...{addr[-6:]}`: ⚖️ FLAT (no open positions)")
+                
+                positions_text = "\n".join(position_lines) if position_lines else "  • No position data available"
+                
                 if summary.get('wallets_active', 0) == 0:
                     # No activity - calm seas
                     blocks = [
@@ -637,6 +708,7 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                             f"*\"The sea was calm, the whales nowhere to be seen...\"*\n\n"
                             f"🔭 Watching: *{wallet_count} VIP whales*\n"
                             f"📊 Activity (last hour): **None detected**\n\n"
+                            f"⚓ *Current Positions (All History):*\n{positions_text}\n\n"
                             f"_All quiet on the Hyperliquid front. The whales slumber beneath the waves..._"
                         )}},
                         {"type": "divider"}
@@ -665,7 +737,8 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                             f"💰 Total deposits: *{summary['total_deposits']}*\n"
                             f"💸 Total withdrawals: *{summary['total_withdrawals']}*\n"
                             f"💵 Total notional: *${summary['total_notional']:,.0f}*\n\n"
-                            f"🎯 Wallet Activity:\n{wallet_summary}\n\n"
+                            f"🎯 *Recent Activity:*\n{wallet_summary}\n\n"
+                            f"⚓ *Current Positions (All History):*\n{positions_text}\n\n"
                             f"_\"The hunt continues through calm and storm alike...\"_ ⚓"
                         )}},
                         {"type": "divider"}
@@ -863,7 +936,7 @@ def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Di
         
         if vip:
             # VIP: alert on ANY trade activity
-            track_vip_activity(address, "TRADE", notional)
+            track_vip_activity(address, "TRADE", notional, side=side, size=amount, token=token)
             out.append({
                 "kind": "VIP_ACTIVITY",
                 "activity_type": "TRADE",
