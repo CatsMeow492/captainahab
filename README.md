@@ -130,6 +130,9 @@ curl https://hyperliquid-alerts.fly.dev/health
 | `CLUSTER_MIN_NOTIONAL` | Minimum total USD for cluster alert | `50000000` |
 | `MARKET_SCAN_TOKENS` | Tokens to monitor for clusters (comma-separated) | `BTC,ETH` |
 | `MARKET_MIN_TRADE_SIZE` | Minimum trade size to track for clusters | `5000000` |
+| `ENABLE_MARKET_SCANNING` | Enable market-wide whale discovery | `true` |
+| `MARKET_SCAN_INTERVAL_SECONDS` | How often to scan for new whales | `300` |
+| `VIP_LOOKBACK_HOURS` | Lookback window for VIP wallets | `48` |
 
 ### 🐋 White Whale Monitoring (VIP Addresses)
 
@@ -164,22 +167,59 @@ Captain Ahab now automatically detects **suspicious whale pods** — coordinated
 - 80%+ directional alignment (all SHORT or all LONG)
 - Suspicion score ≥ 70/100
 
+**Advanced Pattern Detection (NEW):**
+- 📏 **Size Clustering**: Trades with similar notional values (CV < 30%)
+- 🔗 **Cross-Token Coordination**: Same wallets trading multiple tokens simultaneously
+- ⚡ **Lightning Clusters**: All trades within 60 seconds
+- 🆕 **New Wallet Bonus**: Recently created wallets get higher suspicion scores
+- 📊 **Dynamic Thresholds**: Adapts to market conditions using percentile analysis
+
+**Suspicion Scoring (0-100):**
+- Timing tightness: 0-30 pts (tighter = higher score)
+- Notional size: 0-20 pts (larger = higher score)
+- Wallet count: 0-15 pts (more wallets = higher score)
+- Wallet age: 0-10 pts (newer = higher score)
+- Directional alignment: 0-10 pts (95%+ same direction)
+- **NEW** Size clustering: 0-15 pts (similar trade sizes)
+- **NEW** Cross-token: 0-10 pts (multi-token coordination)
+- **NEW** Timing precision: 0-10 pts (all within 60s)
+
 **When Detected:**
 1. 🚨 Instant Slack alert with full details
 2. 💾 Cluster logged to database
 3. ⚓ **ALL cluster wallets auto-added to VIP list**
 4. 🔭 Future monitoring: Every move = instant alert
 
-**Example Cluster Alert:**
+**Example Enhanced Cluster Alert:**
 ```
 ⚠️ SUSPICIOUS CLUSTER DETECTED ⚠️
 "Thar she blows! A pod of whales hunting in formation!" 🐋
 
-🔴 Suspicion Score: 87/100
-📊 Wallets: 4 | Token: BTC | Notional: $147.5M
-⏰ Time window: 23.4 minutes | Direction: 100% SHORT
+🔴 Suspicion Score: 92/100
 
-🎯 Wallets: 0xabcd... ($45M), 0xef12... ($38M), ...
+📊 Cluster Details:
+• Wallets: 4
+• Token: BTC
+• Total notional: $147,500,000
+• Time window: 3.2 minutes
+• Direction: SHORT
+• Alignment: 100%
+
+🎯 Pattern Indicators:
+• 📏 Size clustering: 87% similar
+• 🔗 Cross-token: 2 tokens
+• ⚡ Lightning fast: <60s
+
+⏰ Timeline:
+• First trade: 2025-10-14T13:05:12Z
+• Last trade: 2025-10-14T13:08:24Z
+
+🐋 Wallets:
+• 0xabcd...ef12 ($45.2M)
+• 0x1234...5678 ($38.7M)
+• 0x9abc...def0 ($32.8M)
+• 0xfedc...ba98 ($30.8M)
+
 🚨 ACTION: Adding all wallets to VIP watch list
 ```
 
