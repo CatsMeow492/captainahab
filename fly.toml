@@ -25,6 +25,8 @@ primary_region = 'lax'
   CLUSTER_MIN_NOTIONAL = '50000000'
   MARKET_SCAN_TOKENS = 'BTC,ETH'
   MARKET_MIN_TRADE_SIZE = '5000000'
+  ENABLE_MARKET_SCANNING = 'true'
+  MARKET_SCAN_INTERVAL_SECONDS = '300'
 
 [[mounts]]
   source = 'alertvol'

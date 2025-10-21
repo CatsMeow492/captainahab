@@ -31,6 +31,8 @@ CLUSTER_MIN_SCORE = int(os.getenv("CLUSTER_MIN_SCORE", "70"))
 CLUSTER_MIN_NOTIONAL = float(os.getenv("CLUSTER_MIN_NOTIONAL", "50000000"))
 MARKET_SCAN_TOKENS = [t.strip() for t in os.getenv("MARKET_SCAN_TOKENS", "BTC,ETH").split(",") if t.strip()]
 MARKET_MIN_TRADE_SIZE = float(os.getenv("MARKET_MIN_TRADE_SIZE", "5000000"))
+ENABLE_MARKET_SCANNING = os.getenv("ENABLE_MARKET_SCANNING", "true").lower() == "true"
+MARKET_SCAN_INTERVAL_SECONDS = int(os.getenv("MARKET_SCAN_INTERVAL_SECONDS", "300"))  # 5 minutes
 
 WEBHOOK_URL = os.getenv("WEBHOOK_URL","")  # Slack or Discord
 WEBHOOK_TARGET = os.getenv("WEBHOOK_TARGET","slack").lower()  # "slack" or "discord"
@@ -402,50 +404,261 @@ async def fetch_transfers(address: str, since_ms: int) -> List[Dict[str, Any]]:
         
         return []
 
+async def fetch_market_activity(token: str, lookback_minutes: int = 60) -> List[Dict[str, Any]]:
+    """
+    Fetch recent market-wide trades for a token to discover whale activity.
+    Returns large trades from ALL wallets (not just watched ones).
+    """
+    try:
+        # Query for recent fills across the market
+        # Note: Hyperliquid doesn't have a direct "all trades" endpoint
+        # This is a placeholder - we'll populate from watched wallet scans
+        # and gradually build a market picture
+        
+        # For now, return empty - market_trades table will be populated
+        # from watched wallets and cluster detection will work from there
+        return []
+    
+    except Exception as e:
+        print(f"[ERROR] fetch_market_activity for {token}: {e}")
+        return []
+
+def calculate_dynamic_threshold(token: str, base_threshold: float) -> float:
+    """
+    Calculate dynamic threshold based on recent market activity.
+    Returns adjusted threshold using percentile analysis.
+    """
+    try:
+        # Get recent trades for this token from database
+        cutoff_ms = int((now_utc() - timedelta(hours=24)).timestamp() * 1000)
+        
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.execute("""
+                SELECT notional FROM market_trades
+                WHERE token = ? AND timestamp_ms >= ?
+                ORDER BY notional DESC
+                LIMIT 100
+            """, (token, cutoff_ms))
+            
+            notionals = [row[0] for row in cur.fetchall()]
+        
+        if len(notionals) < 10:
+            # Not enough data, use base threshold
+            return base_threshold
+        
+        import statistics
+        
+        # Calculate 99th percentile
+        notionals_sorted = sorted(notionals)
+        percentile_99_idx = int(len(notionals_sorted) * 0.99)
+        percentile_99 = notionals_sorted[percentile_99_idx] if percentile_99_idx < len(notionals_sorted) else notionals_sorted[-1]
+        
+        # Use lower of base threshold or 99th percentile
+        # This catches "unusual for recent activity" even if below absolute threshold
+        return min(base_threshold, percentile_99)
+    
+    except Exception as e:
+        print(f"[DEBUG] Dynamic threshold calculation failed for {token}: {e}")
+        return base_threshold
+
+def is_unusually_large_for_wallet(wallet: str, notional: float) -> bool:
+    """
+    Check if this trade is unusually large compared to wallet's typical activity.
+    Returns True if trade is 10x+ larger than wallet's median trade.
+    """
+    try:
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.execute("""
+                SELECT notional FROM market_trades
+                WHERE wallet = ?
+                ORDER BY timestamp_ms DESC
+                LIMIT 50
+            """, (wallet,))
+            
+            notionals = [row[0] for row in cur.fetchall()]
+        
+        if len(notionals) < 5:
+            # Not enough history
+            return False
+        
+        import statistics
+        median = statistics.median(notionals)
+        
+        # Is this trade 10x+ larger than median?
+        return notional >= (median * 10)
+    
+    except Exception as e:
+        return False
+
+async def get_wallet_age_days(address: str) -> int:
+    """
+    Get wallet age in days by finding first trade timestamp.
+    Caches result in database to avoid repeated API calls.
+    """
+    try:
+        # Check cache first
+        with sqlite3.connect(DB_PATH) as con:
+            cur = con.execute("""
+                SELECT first_trade_ms FROM trading_baselines
+                WHERE address = ?
+            """, (address,))
+            row = cur.fetchone()
+            
+            if row and row[0]:
+                first_trade_ms = row[0]
+            else:
+                # Fetch from API
+                payload = {
+                    "type": "userFills",
+                    "user": address
+                }
+                data = await http_post_json(HYPERLIQUID_API, payload)
+                
+                if isinstance(data, list) and data:
+                    # Get oldest trade
+                    timestamps = [int(fill.get("time", 0)) for fill in data if fill.get("time")]
+                    first_trade_ms = min(timestamps) if timestamps else int(now_utc().timestamp() * 1000)
+                    
+                    # Cache it
+                    con.execute("""
+                        INSERT OR REPLACE INTO trading_baselines(address, first_trade_ms, last_updated)
+                        VALUES(?, ?, ?)
+                    """, (address, first_trade_ms, int(now_utc().timestamp())))
+                    con.commit()
+                else:
+                    # New wallet with no history
+                    first_trade_ms = int(now_utc().timestamp() * 1000)
+        
+        # Calculate age in days
+        age_ms = int(now_utc().timestamp() * 1000) - first_trade_ms
+        age_days = max(0, age_ms / (1000 * 60 * 60 * 24))
+        
+        return int(age_days)
+    
+    except Exception as e:
+        print(f"[DEBUG] Failed to get wallet age for {address}: {e}")
+        return 30  # Default fallback
+
 # -------------------------
 # Cluster Detection
 # -------------------------
+def detect_size_clustering(trades: List[Dict[str, Any]]) -> float:
+    """
+    Detect if trade sizes cluster around similar values.
+    Returns coefficient of variation (0-1, lower = more clustered).
+    """
+    import statistics
+    
+    notionals = [float(t.get('notional', 0)) for t in trades if t.get('notional', 0) > 0]
+    
+    if len(notionals) < 2:
+        return 1.0
+    
+    mean = statistics.mean(notionals)
+    if mean == 0:
+        return 1.0
+    
+    stdev = statistics.stdev(notionals) if len(notionals) > 1 else 0
+    coefficient_of_variation = stdev / mean
+    
+    return coefficient_of_variation
+
+def detect_cross_token_coordination(trades: List[Dict[str, Any]]) -> int:
+    """
+    Detect if same wallets are trading multiple tokens in coordination.
+    Returns count of tokens where same wallets appear.
+    """
+    wallet_tokens = {}
+    
+    for trade in trades:
+        wallet = trade.get('wallet', trade.get('address', ''))
+        token = trade.get('token', '')
+        
+        if wallet and token:
+            if wallet not in wallet_tokens:
+                wallet_tokens[wallet] = set()
+            wallet_tokens[wallet].add(token)
+    
+    # Find wallets trading multiple tokens
+    multi_token_wallets = {w: tokens for w, tokens in wallet_tokens.items() if len(tokens) > 1}
+    
+    # Count unique tokens being coordinated
+    all_coordinated_tokens = set()
+    for tokens in multi_token_wallets.values():
+        all_coordinated_tokens.update(tokens)
+    
+    return len(all_coordinated_tokens)
+
 def calculate_suspicion_score(cluster_data: Dict[str, Any]) -> int:
     """
     Score 0-100 for insider trading likelihood
+    Enhanced with size clustering and cross-token detection
     """
     score = 0
     
     # Timing tightness (0-30 pts)
     time_span = cluster_data.get('time_span', 60)
-    if time_span < 5:
+    if time_span < 1:
         score += 30
+    elif time_span < 5:
+        score += 25
     elif time_span < 15:
-        score += 20
+        score += 15
     elif time_span < 30:
         score += 10
+    elif time_span < 60:
+        score += 5
         
-    # Notional size (0-25 pts)
+    # Notional size (0-20 pts) - reduced from 25 to make room for new factors
     total_notional = cluster_data.get('total_notional', 0)
     notional_100m = total_notional / 100_000_000
-    score += min(25, int(notional_100m * 10))
+    score += min(20, int(notional_100m * 8))
     
-    # Wallet count (0-20 pts)
+    # Wallet count (0-15 pts) - reduced from 20
     wallet_count = cluster_data.get('wallet_count', 0)
-    score += min(20, wallet_count * 5)
+    score += min(15, wallet_count * 3)
     
-    # Wallet age - newer is more suspicious (0-15 pts)
+    # Wallet age - newer is more suspicious (0-10 pts) - reduced from 15
     avg_wallet_age = cluster_data.get('avg_wallet_age', 30)
     if avg_wallet_age < 3:
-        score += 15
-    elif avg_wallet_age < 7:
         score += 10
+    elif avg_wallet_age < 7:
+        score += 7
     elif avg_wallet_age < 14:
-        score += 5
+        score += 4
         
     # Directional alignment (0-10 pts)
     alignment = cluster_data.get('alignment', 0.5)
-    if alignment > 0.8:
-        score += int((alignment - 0.8) * 50)
+    if alignment > 0.95:
+        score += 10
+    elif alignment > 0.9:
+        score += 8
+    elif alignment > 0.8:
+        score += 5
+    
+    # NEW: Size clustering (0-15 pts) - similar trade sizes = coordinated
+    size_cv = cluster_data.get('size_clustering_cv', 1.0)
+    if size_cv < 0.1:  # Very tight clustering
+        score += 15
+    elif size_cv < 0.2:
+        score += 10
+    elif size_cv < 0.3:
+        score += 5
+    
+    # NEW: Cross-token coordination (0-10 pts) - same wallets on multiple tokens
+    cross_token_count = cluster_data.get('cross_token_count', 0)
+    if cross_token_count >= 3:
+        score += 10
+    elif cross_token_count >= 2:
+        score += 5
+    
+    # NEW: Timing precision bonus (0-10 pts) - all within 60 seconds
+    if time_span < 1:
+        score += 10
     
     return min(100, score)
 
-def detect_trading_cluster(trades: List[Dict[str, Any]], window_minutes: int = None) -> Optional[Dict[str, Any]]:
+async def detect_trading_cluster(trades: List[Dict[str, Any]], window_minutes: int = None) -> Optional[Dict[str, Any]]:
     """
     Detect coordinated trading patterns
     
@@ -479,8 +692,8 @@ def detect_trading_cluster(trades: List[Dict[str, Any]], window_minutes: int = N
         
     # Calculate directional alignment
     sides = [t.get('side', '').lower() for t in trades]
-    sell_count = sum(1 for s in sides if s in ['sell', 'short'])
-    buy_count = sum(1 for s in sides if s in ['buy', 'long'])
+    sell_count = sum(1 for s in sides if s in ['sell', 'short', 'a', 'ask'])
+    buy_count = sum(1 for s in sides if s in ['buy', 'long', 'b', 'bid'])
     alignment = max(sell_count, buy_count) / len(sides) if sides else 0.5
     
     if alignment < 0.8:
@@ -493,16 +706,28 @@ def detect_trading_cluster(trades: List[Dict[str, Any]], window_minutes: int = N
     tokens = [t.get('token', '') for t in trades if t.get('token')]
     token = max(set(tokens), key=tokens.count) if tokens else "Multiple"
     
-    # Calculate average wallet age (use placeholder for now)
-    avg_wallet_age = 30  # TODO: implement wallet age lookup
+    # Calculate average wallet age from all wallets in cluster
+    wallet_ages = []
+    for wallet in wallets:
+        age = await get_wallet_age_days(wallet)
+        wallet_ages.append(age)
+    avg_wallet_age = sum(wallet_ages) / len(wallet_ages) if wallet_ages else 30
     
-    # Calculate suspicion score
+    # NEW: Detect size clustering
+    size_cv = detect_size_clustering(trades)
+    
+    # NEW: Detect cross-token coordination  
+    cross_token_count = detect_cross_token_coordination(trades)
+    
+    # Calculate suspicion score with enhanced factors
     cluster_data = {
         'wallet_count': len(wallets),
         'total_notional': total_notional,
         'time_span': time_span,
         'alignment': alignment,
-        'avg_wallet_age': avg_wallet_age
+        'avg_wallet_age': avg_wallet_age,
+        'size_clustering_cv': size_cv,
+        'cross_token_count': cross_token_count
     }
     score = calculate_suspicion_score(cluster_data)
     
@@ -529,7 +754,9 @@ def detect_trading_cluster(trades: List[Dict[str, Any]], window_minutes: int = N
         'first_trade_ms': min(timestamps),
         'last_trade_ms': max(timestamps),
         'trade_count': len(trades),
-        'alignment': alignment
+        'alignment': alignment,
+        'size_clustering_cv': size_cv,
+        'cross_token_count': cross_token_count
     }
 
 async def add_wallets_to_vip(wallets: List[str], reason: str):
@@ -760,6 +987,21 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                 
                 wallet_list = "\n".join(wallet_lines) if wallet_lines else "• Multiple wallets"
                 
+                # Format pattern indicators
+                pattern_indicators = []
+                size_cv = cluster.get('size_clustering_cv', 1.0)
+                if size_cv < 0.3:
+                    pattern_indicators.append(f"📏 Size clustering: {(1-size_cv)*100:.0f}% similar")
+                
+                cross_token = cluster.get('cross_token_count', 0)
+                if cross_token > 0:
+                    pattern_indicators.append(f"🔗 Cross-token: {cross_token} tokens")
+                
+                if cluster.get('time_window', 60) < 1:
+                    pattern_indicators.append("⚡ Lightning fast: <60s")
+                
+                pattern_text = "\n• ".join(pattern_indicators) if pattern_indicators else "Standard directional cluster"
+                
                 blocks = [
                     {"type": "header", "text": {"type": "plain_text", 
                         "text": "⚠️ SUSPICIOUS CLUSTER DETECTED ⚠️"}},
@@ -773,10 +1015,11 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                         f"• Time window: *{cluster.get('time_window', 0):.1f} minutes*\n"
                         f"• Direction: *{cluster.get('direction', 'UNKNOWN')}*\n"
                         f"• Alignment: *{cluster.get('alignment', 0)*100:.0f}%*\n\n"
+                        f"🎯 Pattern Indicators:\n• {pattern_text}\n\n"
                         f"⏰ Timeline:\n"
                         f"• First trade: `{ms_to_iso(cluster.get('first_trade_ms', 0))}`\n"
                         f"• Last trade: `{ms_to_iso(cluster.get('last_trade_ms', 0))}`\n\n"
-                        f"🎯 Wallets:\n{wallet_list}\n\n"
+                        f"🐋 Wallets:\n{wallet_list}\n\n"
                         f"🚨 **ACTION**: Adding all wallets to VIP watch list\n\n"
                         f"_\"All ye harpooneers stand ready with your irons!\"_"
                     )}},
@@ -950,7 +1193,7 @@ def classify_events(address: str, perps: List[Dict[str,Any]], transfers: List[Di
             })
         else:
             # Regular: only very large short opens
-            is_open_short = ("open" in typ and "short" in typ) or ("short_open" in typ) or side == "sell"
+            is_open_short = ("open" in typ and "short" in typ) or ("short_open" in typ) or side in ["sell", "a", "ask"]
             if is_open_short and notional >= USD_SHORT_THRESHOLD:
                 out.append({
                     "kind":"LARGE_OPEN_SHORT",
@@ -1059,7 +1302,7 @@ async def scan_for_clusters():
             continue
         
         # Detect cluster
-        cluster = detect_trading_cluster(token_trades)
+        cluster = await detect_trading_cluster(token_trades)
         
         if cluster:
             # Check if we've already seen this cluster

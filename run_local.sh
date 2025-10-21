@@ -21,6 +21,8 @@ export CLUSTER_MIN_SCORE="70"
 export CLUSTER_MIN_NOTIONAL="50000000"
 export MARKET_SCAN_TOKENS="BTC,ETH"
 export MARKET_MIN_TRADE_SIZE="5000000"
+export ENABLE_MARKET_SCANNING="true"
+export MARKET_SCAN_INTERVAL_SECONDS="300"
 
 echo "🚀 Starting Captain Ahab - Whale Watcher (Local Mode)"
 echo "🐋 CLUSTER DETECTION ENABLED"
