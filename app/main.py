@@ -1289,7 +1289,10 @@ async def scan_for_clusters():
     # Get recent trades from database
     recent_trades = get_recent_market_trades()
     
+    print(f"[CLUSTER_SCAN] Checking database: {len(recent_trades)} recent trades (need 3+ to scan)")
+    
     if len(recent_trades) < 3:
+        print(f"[CLUSTER_SCAN] Not enough trades for cluster detection (have {len(recent_trades)}, need 3+)")
         return
     
     # Group by token for more focused cluster detection
@@ -1324,7 +1327,9 @@ async def scan_for_clusters():
                 reason = f"Cluster {cluster['cluster_id'][:8]} (score: {cluster['score']})"
                 await add_wallets_to_vip(cluster['wallets'], reason)
     
+    # Always increment counter when we complete a scan (even if no clusters found)
     stats["market_scans_completed"] += 1
+    print(f"[CLUSTER_SCAN] Completed scan of {len(recent_trades)} trades across {len(tokens)} tokens")
 
 # -------------------------
 # Poll loop
@@ -1356,11 +1361,16 @@ async def scan_once():
             continue
 
         # Store large trades for cluster detection
+        stored_count = 0
         for trade in perps:
             if trade.get('notional', 0) >= MARKET_MIN_TRADE_SIZE:
                 trade['wallet'] = addr
                 trade['address'] = addr
                 store_market_trade(trade)
+                stored_count += 1
+        
+        if stored_count > 0:
+            print(f"[MARKET_TRADES] Stored {stored_count} large trades (>=${MARKET_MIN_TRADE_SIZE/1e6:.0f}M) for {addr[:10]}...")
         
         findings = classify_events(addr, perps, transfers)
 
