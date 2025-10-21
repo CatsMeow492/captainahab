@@ -1412,6 +1412,45 @@ async def scan_once():
 async def health():
     return "ok"
 
+@app.get("/status")
+async def get_status():
+    """Return current Captain Ahab status as JSON for frontend widget"""
+    uptime = datetime.now(timezone.utc) - stats["start_time"] if stats["start_time"] else timedelta(0)
+    
+    # Get VIP positions
+    vip_positions = {}
+    for addr in VIP_ADDRESSES[:2]:  # Limit to avoid slow response
+        positions = await get_wallet_net_position(addr)
+        if positions:
+            vip_positions[addr] = positions
+    
+    # Get VIP summary
+    summary = get_vip_summary()
+    
+    return {
+        "status": "hunting",
+        "uptime_hours": uptime.total_seconds() / 3600,
+        "monitoring": {
+            "vip_wallets": len(VIP_ADDRESSES),
+            "total_wallets": len(WATCH_ADDRESSES),
+            "cluster_detection": CLUSTER_DETECTION_ENABLED
+        },
+        "stats": {
+            "scans_completed": stats["scans_completed"],
+            "alerts_sent": stats["alerts_sent"],
+            "clusters_detected": stats["clusters_detected"],
+            "vip_wallets_added": stats["wallets_added_to_vip"]
+        },
+        "vip_summary": {
+            "wallets_active_last_hour": summary["wallets_active"],
+            "trades_last_hour": summary["total_trades"],
+            "total_notional_last_hour": summary["total_notional"]
+        },
+        "vip_positions": vip_positions,
+        "hyperliquid_status": stats["hyperliquid_status"],
+        "last_check": stats["last_hyperliquid_check"].isoformat() if stats["last_hyperliquid_check"] else None
+    }
+
 @app.post("/reset-vip-cursors", response_class=PlainTextResponse)
 async def reset_vip_cursors():
     """Reset cursors for all VIP wallets to force re-scan of recent history"""
