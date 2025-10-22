@@ -410,10 +410,12 @@ async def fetch_market_activity(token: str, lookback_minutes: int = 60) -> List[
     Returns large trades from ALL wallets (not just watched ones).
     """
     try:
-        # Query for recent fills across the market
-        # Note: Hyperliquid doesn't have a direct "all trades" endpoint
-        # This is a placeholder - we'll populate from watched wallet scans
-        # and gradually build a market picture
+        # Hyperliquid doesn't have a direct "all trades" endpoint
+        # But we can discover whales through several methods:
+        
+        # Method 1: Scan recent large trades from our market_trades table
+        # Method 2: Use cluster detection to find coordinated activity
+        # Method 3: Monitor for new large wallets in our existing scans
         
         # For now, return empty - market_trades table will be populated
         # from watched wallets and cluster detection will work from there
@@ -421,6 +423,116 @@ async def fetch_market_activity(token: str, lookback_minutes: int = 60) -> List[
     
     except Exception as e:
         print(f"[ERROR] fetch_market_activity for {token}: {e}")
+        return []
+
+async def discover_new_whales() -> List[Dict[str, Any]]:
+    """
+    Discover new large wallets by analyzing recent market activity.
+    Returns list of newly discovered whale wallets with their stats.
+    """
+    try:
+        # Look for wallets that have made large trades recently
+        # but are not in our VIP or watch lists
+        cutoff_ms = int((now_utc() - timedelta(hours=24)).timestamp() * 1000)
+        
+        with sqlite3.connect(DB_PATH) as con:
+            # Find wallets with large trades that aren't being watched
+            cur = con.execute("""
+                SELECT wallet, 
+                       COUNT(*) as trade_count,
+                       SUM(notional) as total_notional,
+                       MAX(notional) as max_trade,
+                       GROUP_CONCAT(DISTINCT token) as tokens,
+                       MIN(timestamp_ms) as first_seen,
+                       MAX(timestamp_ms) as last_seen
+                FROM market_trades 
+                WHERE timestamp_ms >= ?
+                GROUP BY wallet
+                HAVING total_notional >= ? AND max_trade >= ?
+                ORDER BY total_notional DESC
+                LIMIT 20
+            """, (cutoff_ms, 10_000_000, 5_000_000))  # $10M+ total, $5M+ max trade
+            
+            whale_candidates = []
+            for row in cur.fetchall():
+                wallet, trade_count, total_notional, max_trade, tokens, first_seen, last_seen = row
+                
+                # Skip if already being watched
+                if wallet in WATCH_ADDRESSES or wallet in VIP_ADDRESSES:
+                    continue
+                
+                # Calculate whale score (0-100)
+                whale_score = min(100, (total_notional / 100_000_000) * 50 + (max_trade / 50_000_000) * 30 + min(20, trade_count))
+                
+                whale_candidates.append({
+                    'wallet': wallet,
+                    'trade_count': trade_count,
+                    'total_notional': total_notional,
+                    'max_trade': max_trade,
+                    'tokens': tokens.split(',') if tokens else [],
+                    'first_seen': first_seen,
+                    'last_seen': last_seen,
+                    'whale_score': whale_score,
+                    'discovery_time': int(now_utc().timestamp() * 1000)
+                })
+        
+        return whale_candidates
+    
+    except Exception as e:
+        print(f"[ERROR] discover_new_whales: {e}")
+        return []
+
+async def get_whale_leaderboard() -> List[Dict[str, Any]]:
+    """
+    Get current whale leaderboard based on recent activity.
+    Returns top whales by various metrics.
+    """
+    try:
+        cutoff_ms = int((now_utc() - timedelta(hours=24)).timestamp() * 1000)
+        
+        with sqlite3.connect(DB_PATH) as con:
+            # Top whales by total notional in last 24h
+            cur = con.execute("""
+                SELECT wallet, 
+                       COUNT(*) as trade_count,
+                       SUM(notional) as total_notional,
+                       MAX(notional) as max_trade,
+                       GROUP_CONCAT(DISTINCT token) as tokens,
+                       AVG(notional) as avg_trade,
+                       MAX(timestamp_ms) as last_activity
+                FROM market_trades 
+                WHERE timestamp_ms >= ?
+                GROUP BY wallet
+                HAVING total_notional >= ?
+                ORDER BY total_notional DESC
+                LIMIT 15
+            """, (cutoff_ms, 5_000_000))  # $5M+ minimum
+            
+            leaderboard = []
+            for row in cur.fetchall():
+                wallet, trade_count, total_notional, max_trade, tokens, avg_trade, last_activity = row
+                
+                # Determine if VIP or regular
+                is_vip = wallet in VIP_ADDRESSES
+                is_watched = wallet in WATCH_ADDRESSES
+                
+                leaderboard.append({
+                    'wallet': wallet,
+                    'trade_count': trade_count,
+                    'total_notional': total_notional,
+                    'max_trade': max_trade,
+                    'avg_trade': avg_trade,
+                    'tokens': tokens.split(',') if tokens else [],
+                    'last_activity': last_activity,
+                    'is_vip': is_vip,
+                    'is_watched': is_watched,
+                    'status': 'VIP' if is_vip else ('Watched' if is_watched else 'Unknown')
+                })
+        
+        return leaderboard
+    
+    except Exception as e:
+        print(f"[ERROR] get_whale_leaderboard: {e}")
         return []
 
 def calculate_dynamic_threshold(token: str, base_threshold: float) -> float:
@@ -1026,6 +1138,37 @@ async def send_status_message(message_type: str, details: Optional[Dict[str, Any
                     {"type": "divider"}
                 ]
             
+            elif message_type == "whale_discovery":
+                whales = details.get('whales', [])
+                
+                # Format whale list
+                whale_lines = []
+                for whale in whales[:5]:  # Show top 5
+                    whale_lines.append(
+                        f"• `{whale['wallet'][:10]}...{whale['wallet'][-6:]}` "
+                        f"Score: {whale['whale_score']:.0f}/100 | "
+                        f"${whale['total_notional']/1e6:.1f}M total | "
+                        f"{whale['trade_count']} trades"
+                    )
+                
+                whale_list = "\n".join(whale_lines)
+                
+                blocks = [
+                    {"type": "header", "text": {"type": "plain_text", 
+                        "text": "🐋 NEW WHALES DISCOVERED 🐋"}},
+                    {"type": "section", "text": {"type": "mrkdwn", "text": (
+                        f"*\"Thar she blows! New whales spotted on the horizon!\"* 🐋\n\n"
+                        f"🔍 **Discovery Summary:**\n"
+                        f"• New whales found: *{len(whales)}*\n"
+                        f"• Top whale score: *{whales[0]['whale_score']:.0f}/100*\n"
+                        f"• Largest trade: *${whales[0]['max_trade']/1e6:.1f}M*\n\n"
+                        f"🐋 **Top Whales:**\n{whale_list}\n\n"
+                        f"⚓ **Action:** Monitoring for further activity\n\n"
+                        f"_\"The hunt expands to new waters...\"_"
+                    )}},
+                    {"type": "divider"}
+                ]
+            
             await post_slack(blocks)
         else:
             # Discord version
@@ -1331,6 +1474,39 @@ async def scan_for_clusters():
     stats["market_scans_completed"] += 1
     print(f"[CLUSTER_SCAN] Completed scan of {len(recent_trades)} trades across {len(tokens)} tokens")
 
+async def scan_for_new_whales():
+    """
+    Scan for newly discovered whale wallets and send discovery alerts.
+    """
+    try:
+        # Discover new whales
+        new_whales = await discover_new_whales()
+        
+        if not new_whales:
+            return
+        
+        print(f"[WHALE_DISCOVERY] Found {len(new_whales)} new whale candidates")
+        
+        # Filter for high-scoring whales (70+ score)
+        significant_whales = [w for w in new_whales if w['whale_score'] >= 70]
+        
+        if significant_whales:
+            print(f"[WHALE_DISCOVERY] 🐋 {len(significant_whales)} significant whales discovered!")
+            
+            # Send discovery alert
+            await send_status_message("whale_discovery", {"whales": significant_whales})
+            
+            # Optionally auto-add top whales to watch list
+            top_whale = significant_whales[0]  # Highest scoring
+            if top_whale['whale_score'] >= 85:  # Very high score
+                print(f"[WHALE_DISCOVERY] 🚨 Auto-adding top whale to VIP: {top_whale['wallet'][:10]}...")
+                await add_wallets_to_vip([top_whale['wallet']])
+        
+    except Exception as e:
+        print(f"[ERROR] scan_for_new_whales failed: {e}")
+        import traceback
+        traceback.print_exc()
+
 # -------------------------
 # Poll loop
 # -------------------------
@@ -1449,7 +1625,8 @@ async def get_status():
             "scans_completed": stats["scans_completed"],
             "alerts_sent": stats["alerts_sent"],
             "clusters_detected": stats["clusters_detected"],
-            "vip_wallets_added": stats["wallets_added_to_vip"]
+            "vip_wallets_added": stats["wallets_added_to_vip"],
+            "market_scans_completed": stats["market_scans_completed"]
         },
         "vip_summary": {
             "wallets_active_last_hour": summary["wallets_active"],
@@ -1474,6 +1651,57 @@ async def reset_vip_cursors():
     
     print(f"[ADMIN] Reset cursors for {count} VIP wallets - will re-scan last {VIP_LOOKBACK_HOURS} hours")
     return f"Reset {count} VIP wallet cursors. Next scan will look back {VIP_LOOKBACK_HOURS} hours."
+
+@app.get("/whales/discover")
+async def discover_whales():
+    """Discover new whale wallets and return results"""
+    try:
+        new_whales = await discover_new_whales()
+        return {
+            "success": True,
+            "whales_found": len(new_whales),
+            "whales": new_whales
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "whales": []
+        }
+
+@app.get("/whales/leaderboard")
+async def whale_leaderboard():
+    """Get current whale leaderboard"""
+    try:
+        leaderboard = await get_whale_leaderboard()
+        return {
+            "success": True,
+            "whales": leaderboard,
+            "total_whales": len(leaderboard)
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "whales": []
+        }
+
+@app.post("/whales/add-to-vip")
+async def add_whale_to_vip(wallet: str):
+    """Manually add a whale wallet to VIP monitoring"""
+    try:
+        await add_wallets_to_vip([wallet], "Manual addition via API")
+        return {
+            "success": True,
+            "message": f"Added {wallet} to VIP monitoring",
+            "wallet": wallet
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "wallet": wallet
+        }
 
 def load_vip_wallets_from_db():
     """Load dynamically added VIP wallets from database on startup"""
@@ -1536,6 +1764,10 @@ async def poll_loop():
             # Run cluster detection after wallet scans
             if CLUSTER_DETECTION_ENABLED:
                 await scan_for_clusters()
+            
+            # Run whale discovery scan (less frequent)
+            if stats["scans_completed"] % 10 == 0:  # Every 10th scan
+                await scan_for_new_whales()
             
             # Send periodic status report (every 2 hours)
             if now_utc() >= next_status_report:
